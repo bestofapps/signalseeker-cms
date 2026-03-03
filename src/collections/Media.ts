@@ -11,6 +11,10 @@ export const Media: CollectionConfig = {
       type: 'text',
       required: true,
     },
+    {
+      name: 'caption',
+      type: 'text',
+    },
   ],
   upload: {
     // These are not supported on Workers yet due to lack of sharp

@@ -10,6 +10,13 @@ import { r2Storage } from '@payloadcms/storage-r2'
 
 import { Users } from './collections/Users'
 import { Media } from './collections/Media'
+import { Authors } from './collections/Authors'
+import { Categories } from './collections/Categories'
+import { Posts } from './collections/Posts'
+import { Pages } from './collections/Pages'
+import { Header } from './globals/Header'
+import { Footer } from './globals/Footer'
+import { seoPlugin } from '@payloadcms/plugin-seo'
 
 const filename = fileURLToPath(import.meta.url)
 const dirname = path.dirname(filename)
@@ -50,7 +57,8 @@ export default buildConfig({
       baseDir: path.resolve(dirname),
     },
   },
-  collections: [Users, Media],
+  collections: [Users, Media, Authors, Categories, Posts, Pages],
+  globals: [Header, Footer],
   editor: lexicalEditor(),
   secret: process.env.PAYLOAD_SECRET || '',
   typescript: {
@@ -62,6 +70,14 @@ export default buildConfig({
     r2Storage({
       bucket: cloudflare.env.R2,
       collections: { media: true },
+    }),
+    seoPlugin({
+      collections: ['posts', 'pages'],
+      tabbedUI: true,
+      generateTitle: ({ doc }: { doc: Record<string, unknown> }) =>
+        `${doc?.title ?? ''} | The Signal Seeker`,
+      generateDescription: ({ doc }: { doc: Record<string, unknown> }) =>
+        (doc?.excerpt as string) ?? '',
     }),
   ],
 })
