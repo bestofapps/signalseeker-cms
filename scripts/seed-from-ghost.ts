@@ -2,11 +2,12 @@
  * Ghost → Payload CMS Migration Script
  *
  * Fetches all posts, authors, and tags from Ghost and creates them in Payload
- * via the REST API.
+ * via the REST API. Uses Payload's official convertMarkdownToLexical for
+ * rich text conversion.
  *
  * Usage:
- *   1. Start Payload dev server: pnpm dev
- *   2. Create your admin user at http://localhost:3000/admin
+ *   1. Deploy the CMS (or start dev server: pnpm dev)
+ *   2. Create your admin user at /admin
  *   3. Run: npx tsx scripts/seed-from-ghost.ts
  *
  * Environment variables (optional):
@@ -17,9 +18,15 @@
  *   GHOST_KEY      — Ghost Content API key (default: da149ef5fbdf8f6acc74a9a2ed)
  */
 
-const PAYLOAD_URL = process.env.PAYLOAD_URL || 'http://localhost:3000'
-const PAYLOAD_EMAIL = process.env.PAYLOAD_EMAIL || ''
-const PAYLOAD_PASS = process.env.PAYLOAD_PASS || ''
+import {
+  convertMarkdownToLexical,
+  editorConfigFactory,
+  defaultEditorFeatures,
+} from '@payloadcms/richtext-lexical'
+
+const PAYLOAD_URL = process.env.PAYLOAD_URL || 'https://signalseeker-cms.at2010.workers.dev/'
+const PAYLOAD_EMAIL = 'g.siemer@cliqdigital.com'
+const PAYLOAD_PASS = 'qwq3ubp!hdm_cvb3VRF'
 
 const GHOST_URL = process.env.GHOST_URL || 'https://cms.yepp-yepp.com'
 const GHOST_KEY = process.env.GHOST_KEY || 'da149ef5fbdf8f6acc74a9a2ed'
@@ -76,7 +83,6 @@ let payloadToken = ''
 async function payloadLogin(): Promise<void> {
   if (!PAYLOAD_EMAIL || !PAYLOAD_PASS) {
     console.error('\n❌ Please set PAYLOAD_EMAIL and PAYLOAD_PASS environment variables.')
-    console.error('   Example: PAYLOAD_EMAIL=admin@example.com PAYLOAD_PASS=secret npx tsx scripts/seed-from-ghost.ts\n')
     process.exit(1)
   }
 
@@ -112,22 +118,6 @@ async function payloadPost(collection: string, body: Record<string, unknown>): P
   }
 
   return (await res.json()) as Record<string, unknown>
-}
-
-async function payloadPatch(collection: string, id: number, body: Record<string, unknown>): Promise<void> {
-  const res = await fetch(`${PAYLOAD_URL}/api/${collection}/${id}`, {
-    method: 'PATCH',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `JWT ${payloadToken}`,
-    },
-    body: JSON.stringify(body),
-  })
-
-  if (!res.ok) {
-    const text = await res.text()
-    throw new Error(`PATCH /api/${collection}/${id} failed (${res.status}): ${text}`)
-  }
 }
 
 async function payloadUpdateGlobal(slug: string, body: Record<string, unknown>): Promise<void> {
@@ -167,222 +157,141 @@ async function fetchGhostTags(): Promise<GhostTag[]> {
 }
 
 // ---------------------------------------------------------------------------
-// HTML → Lexical converter (simple paragraph-based conversion)
-//
-// Ghost stores content as HTML. Payload uses Lexical JSON.
-// This converts each HTML block-level element into Lexical nodes.
+// HTML → Markdown converter
 // ---------------------------------------------------------------------------
 
-function htmlToLexical(html: string): Record<string, unknown> {
-  // Split HTML into block-level chunks
-  const blocks: string[] = []
-  const blockRegex = /<(p|h[1-6]|blockquote|ul|ol|hr|figure|div|table)[^>]*>([\s\S]*?)<\/\1>|<hr\s*\/?>/gi
-  let match: RegExpExecArray | null
+function htmlToMarkdown(html: string): string {
+  let md = html
 
-  while ((match = blockRegex.exec(html)) !== null) {
-    blocks.push(match[0])
-  }
+  // Headings
+  md = md.replace(/<h1[^>]*>([\s\S]*?)<\/h1>/gi, (_, c) => `# ${stripTags(c).trim()}\n\n`)
+  md = md.replace(/<h2[^>]*>([\s\S]*?)<\/h2>/gi, (_, c) => `## ${stripTags(c).trim()}\n\n`)
+  md = md.replace(/<h3[^>]*>([\s\S]*?)<\/h3>/gi, (_, c) => `### ${stripTags(c).trim()}\n\n`)
+  md = md.replace(/<h4[^>]*>([\s\S]*?)<\/h4>/gi, (_, c) => `#### ${stripTags(c).trim()}\n\n`)
+  md = md.replace(/<h5[^>]*>([\s\S]*?)<\/h5>/gi, (_, c) => `##### ${stripTags(c).trim()}\n\n`)
+  md = md.replace(/<h6[^>]*>([\s\S]*?)<\/h6>/gi, (_, c) => `###### ${stripTags(c).trim()}\n\n`)
 
-  // If no blocks matched, wrap whole thing as paragraph
-  if (blocks.length === 0 && html.trim()) {
-    blocks.push(`<p>${html}</p>`)
-  }
+  // Horizontal rules
+  md = md.replace(/<hr\s*\/?>/gi, '\n---\n\n')
 
-  const children: Record<string, unknown>[] = blocks.map((block) => {
-    // Headings
-    const headingMatch = block.match(/^<(h[1-6])[^>]*>([\s\S]*?)<\/\1>$/i)
-    if (headingMatch) {
-      return {
-        type: 'heading',
-        tag: headingMatch[1].toLowerCase(),
-        children: parseInline(headingMatch[2]),
-        direction: 'ltr',
-        format: '',
-        indent: 0,
-        version: 1,
-      }
-    }
-
-    // Horizontal rule
-    if (/^<hr/i.test(block)) {
-      return {
-        type: 'horizontalrule',
-        version: 1,
-      }
-    }
-
-    // Blockquote
-    const bqMatch = block.match(/^<blockquote[^>]*>([\s\S]*?)<\/blockquote>$/i)
-    if (bqMatch) {
-      return {
-        type: 'quote',
-        children: parseInline(stripTags(bqMatch[1]).trim()),
-        direction: 'ltr',
-        format: '',
-        indent: 0,
-        version: 1,
-      }
-    }
-
-    // Unordered list
-    const ulMatch = block.match(/^<ul[^>]*>([\s\S]*?)<\/ul>$/i)
-    if (ulMatch) {
-      return {
-        type: 'list',
-        listType: 'bullet',
-        tag: 'ul',
-        children: parseListItems(ulMatch[1]),
-        direction: 'ltr',
-        format: '',
-        indent: 0,
-        start: 1,
-        version: 1,
-      }
-    }
-
-    // Ordered list
-    const olMatch = block.match(/^<ol[^>]*>([\s\S]*?)<\/ol>$/i)
-    if (olMatch) {
-      return {
-        type: 'list',
-        listType: 'number',
-        tag: 'ol',
-        children: parseListItems(olMatch[1]),
-        direction: 'ltr',
-        format: '',
-        indent: 0,
-        start: 1,
-        version: 1,
-      }
-    }
-
-    // Default: paragraph
-    const pMatch = block.match(/^<p[^>]*>([\s\S]*?)<\/p>$/i)
-    const inner = pMatch ? pMatch[1] : stripTags(block)
-
-    return {
-      type: 'paragraph',
-      children: parseInline(inner),
-      direction: 'ltr',
-      format: '',
-      indent: 0,
-      textFormat: 0,
-      version: 1,
-    }
+  // Blockquotes
+  md = md.replace(/<blockquote[^>]*>([\s\S]*?)<\/blockquote>/gi, (_, c) => {
+    const text = stripTags(c).trim()
+    return text.split('\n').map((line: string) => `> ${line}`).join('\n') + '\n\n'
   })
 
-  return {
-    root: {
-      type: 'root',
-      children,
-      direction: 'ltr',
-      format: '',
-      indent: 0,
-      version: 1,
-    },
-  }
+  // Bold / strong
+  md = md.replace(/<(strong|b)>([\s\S]*?)<\/\1>/gi, '**$2**')
+
+  // Italic / em
+  md = md.replace(/<(em|i)>([\s\S]*?)<\/\1>/gi, '*$2*')
+
+  // Strikethrough
+  md = md.replace(/<(s|del)>([\s\S]*?)<\/\1>/gi, '~~$2~~')
+
+  // Code inline
+  md = md.replace(/<code>([\s\S]*?)<\/code>/gi, '`$1`')
+
+  // Links
+  md = md.replace(/<a[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi, '[$2]($1)')
+
+  // Images
+  md = md.replace(/<img[^>]*src="([^"]*)"[^>]*alt="([^"]*)"[^>]*\/?>/gi, '![$2]($1)')
+  md = md.replace(/<img[^>]*src="([^"]*)"[^>]*\/?>/gi, '![]($1)')
+
+  // Lists — unordered
+  md = md.replace(/<ul[^>]*>([\s\S]*?)<\/ul>/gi, (_, items) => {
+    return items.replace(/<li[^>]*>([\s\S]*?)<\/li>/gi, (_: string, content: string) => {
+      return `- ${convertInline(content).trim()}\n`
+    }) + '\n'
+  })
+
+  // Lists — ordered
+  md = md.replace(/<ol[^>]*>([\s\S]*?)<\/ol>/gi, (_, items) => {
+    let i = 0
+    return items.replace(/<li[^>]*>([\s\S]*?)<\/li>/gi, (_: string, content: string) => {
+      i++
+      return `${i}. ${convertInline(content).trim()}\n`
+    }) + '\n'
+  })
+
+  // Figures with images
+  md = md.replace(/<figure[^>]*>[\s\S]*?<img[^>]*src="([^"]*)"[^>]*\/?>([\s\S]*?)<\/figure>/gi, '![]($1)\n\n')
+
+  // Paragraphs
+  md = md.replace(/<p[^>]*>([\s\S]*?)<\/p>/gi, (_, c) => `${convertInline(c).trim()}\n\n`)
+
+  // Line breaks
+  md = md.replace(/<br\s*\/?>/gi, '\n')
+
+  // Strip remaining tags
+  md = md.replace(/<\/?[^>]+>/g, '')
+
+  // Decode HTML entities
+  md = decodeEntities(md)
+
+  // Clean up excess whitespace
+  md = md.replace(/\n{3,}/g, '\n\n').trim()
+
+  return md
 }
 
-function parseInline(html: string): Record<string, unknown>[] {
-  if (!html || !html.trim()) {
-    return [{ type: 'text', text: '', format: 0, detail: 0, mode: 'normal', style: '', version: 1 }]
-  }
-
-  const nodes: Record<string, unknown>[] = []
-  // Process inline HTML: split on tags, handle bold/italic/links/code
-  const inlineRegex = /<(strong|b|em|i|code|a|u|s|del|sub|sup)(\s[^>]*)?>|<\/(strong|b|em|i|code|a|u|s|del|sub|sup)>|<br\s*\/?>|([^<]+)/gi
-  let currentFormat = 0
-  let currentLink: string | null = null
-  let inlineMatch: RegExpExecArray | null
-
-  while ((inlineMatch = inlineRegex.exec(html)) !== null) {
-    const [full, openTag, attrs, closeTag, text] = inlineMatch
-
-    if (text) {
-      const decoded = decodeHtmlEntities(text)
-      if (decoded) {
-        if (currentLink) {
-          nodes.push({
-            type: 'link',
-            fields: { url: currentLink, newTab: false, linkType: 'custom' },
-            children: [{ type: 'text', text: decoded, format: currentFormat, detail: 0, mode: 'normal', style: '', version: 1 }],
-            direction: 'ltr',
-            format: '',
-            indent: 0,
-            version: 3,
-          })
-        } else {
-          nodes.push({ type: 'text', text: decoded, format: currentFormat, detail: 0, mode: 'normal', style: '', version: 1 })
-        }
-      }
-    } else if (full === '<br>' || full === '<br/>' || full === '<br />') {
-      nodes.push({ type: 'linebreak', version: 1 })
-    } else if (openTag) {
-      const tag = openTag.toLowerCase()
-      if (tag === 'strong' || tag === 'b') currentFormat |= 1
-      else if (tag === 'em' || tag === 'i') currentFormat |= 2
-      else if (tag === 's' || tag === 'del') currentFormat |= 4
-      else if (tag === 'u') currentFormat |= 8
-      else if (tag === 'code') currentFormat |= 16
-      else if (tag === 'sub') currentFormat |= 32
-      else if (tag === 'sup') currentFormat |= 64
-      else if (tag === 'a') {
-        const hrefMatch = attrs?.match(/href="([^"]*)"/)
-        currentLink = hrefMatch ? hrefMatch[1] : '#'
-      }
-    } else if (closeTag) {
-      const tag = closeTag.toLowerCase()
-      if (tag === 'strong' || tag === 'b') currentFormat &= ~1
-      else if (tag === 'em' || tag === 'i') currentFormat &= ~2
-      else if (tag === 's' || tag === 'del') currentFormat &= ~4
-      else if (tag === 'u') currentFormat &= ~8
-      else if (tag === 'code') currentFormat &= ~16
-      else if (tag === 'sub') currentFormat &= ~32
-      else if (tag === 'sup') currentFormat &= ~64
-      else if (tag === 'a') currentLink = null
-    }
-  }
-
-  if (nodes.length === 0) {
-    nodes.push({ type: 'text', text: '', format: 0, detail: 0, mode: 'normal', style: '', version: 1 })
-  }
-
-  return nodes
-}
-
-function parseListItems(html: string): Record<string, unknown>[] {
-  const items: Record<string, unknown>[] = []
-  const liRegex = /<li[^>]*>([\s\S]*?)<\/li>/gi
-  let match: RegExpExecArray | null
-
-  while ((match = liRegex.exec(html)) !== null) {
-    items.push({
-      type: 'listitem',
-      children: parseInline(match[1]),
-      direction: 'ltr',
-      format: '',
-      indent: 0,
-      value: items.length + 1,
-      version: 1,
-    })
-  }
-
-  return items
+function convertInline(html: string): string {
+  let text = html
+  text = text.replace(/<(strong|b)>([\s\S]*?)<\/\1>/gi, '**$2**')
+  text = text.replace(/<(em|i)>([\s\S]*?)<\/\1>/gi, '*$2*')
+  text = text.replace(/<(s|del)>([\s\S]*?)<\/\1>/gi, '~~$2~~')
+  text = text.replace(/<code>([\s\S]*?)<\/code>/gi, '`$1`')
+  text = text.replace(/<a[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi, '[$2]($1)')
+  text = text.replace(/<br\s*\/?>/gi, '\n')
+  text = text.replace(/<\/?[^>]+>/g, '')
+  return text
 }
 
 function stripTags(html: string): string {
   return html.replace(/<[^>]+>/g, '')
 }
 
-function decodeHtmlEntities(text: string): string {
+function decodeEntities(text: string): string {
   return text
     .replace(/&amp;/g, '&')
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
+    .replace(/&apos;/g, "'")
     .replace(/&nbsp;/g, ' ')
     .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(parseInt(n)))
+}
+
+// ---------------------------------------------------------------------------
+// Lexical converter — uses Payload's official markdown → Lexical
+// ---------------------------------------------------------------------------
+
+let _editorConfig: Awaited<ReturnType<typeof editorConfigFactory.fromFeatures>> | null = null
+
+async function getEditorConfig() {
+  if (!_editorConfig) {
+    _editorConfig = await editorConfigFactory.fromFeatures({
+      features: defaultEditorFeatures,
+      config: {
+        collections: [],
+        globals: [],
+        localization: false,
+      } as any,
+    })
+  }
+  return _editorConfig
+}
+
+async function markdownToLexical(markdown: string): Promise<Record<string, unknown>> {
+  const editorConfig = await getEditorConfig()
+  return convertMarkdownToLexical({ editorConfig, markdown })
+}
+
+async function htmlToLexical(html: string): Promise<Record<string, unknown>> {
+  const markdown = htmlToMarkdown(html)
+  return markdownToLexical(markdown)
 }
 
 // ---------------------------------------------------------------------------
@@ -404,7 +313,7 @@ async function main() {
 
   // 3. Create categories (from Ghost tags)
   console.log('\n📁 Creating categories...')
-  const categoryMap = new Map<string, number>() // ghostSlug → payloadId
+  const categoryMap = new Map<string, number>()
 
   for (const tag of ghostTags) {
     try {
@@ -422,7 +331,7 @@ async function main() {
     }
   }
 
-  // 4. Create author (Julian Vane — the single Ghost author)
+  // 4. Create author
   console.log('\n👤 Creating author...')
   let authorId: number | null = null
 
@@ -451,13 +360,12 @@ async function main() {
 
   for (const post of ghostPosts) {
     try {
-      // Map Ghost tags to Payload category IDs
       const categoryIds = post.tags
         .map((t) => categoryMap.get(t.slug))
         .filter((id): id is number => id !== undefined)
 
-      // Convert HTML to Lexical
-      const lexicalContent = htmlToLexical(post.html)
+      // Convert Ghost HTML → Markdown → Lexical JSON
+      const lexicalContent = await htmlToLexical(post.html)
 
       const postData: Record<string, unknown> = {
         title: post.title,
@@ -470,7 +378,6 @@ async function main() {
         _status: 'published',
         ...(authorId ? { author: authorId } : {}),
         ...(categoryIds.length > 0 ? { categories: categoryIds } : {}),
-        // SEO fields from Ghost
         meta: {
           title: post.meta_title || `${post.title} | The Signal Seeker`,
           description: post.meta_description || post.custom_excerpt || post.excerpt?.slice(0, 160) || undefined,
@@ -536,6 +443,161 @@ async function main() {
     console.log('   ✓ Footer seeded')
   } catch (e) {
     console.error(`   ✗ Footer update failed: ${(e as Error).message.slice(0, 200)}`)
+  }
+
+  // 8. Create static pages
+  console.log('\n📄 Creating static pages...')
+
+  const staticPages = [
+    {
+      title: 'About',
+      slug: 'about',
+      meta: {
+        title: 'About | The Signal Seeker',
+        description: 'Learn about The Signal Seeker — gear reviews, digital nomad tips, and travel tech insights for remote workers on the move.',
+      },
+      layout: [
+        {
+          blockType: 'content',
+          richText: await markdownToLexical(
+            'Welcome to The Signal Seeker — your go-to resource for navigating the digital nomad lifestyle with the right gear, tech, and mindset.\n\n' +
+            'Born from a shared passion for remote work and exploration, we believe that location independence is more than just a trend; it\'s a way of life. Whether you\'re setting up a mobile office in Bali, testing the latest portable monitor in Lisbon, or finding the best coworking space in Medellín — we\'ve been there.\n\n' +
+            '## Our Mission\n\n' +
+            'We cut through the noise to deliver honest gear reviews, actionable digital nomad tips, and travel tech insights that actually matter. No fluff, no sponsored rankings — just real-world testing by people who live this life every day.\n\n' +
+            '> The best office view is the one you choose yourself.\n\n' +
+            '## Who We Are\n\n' +
+            'We are a collective of writers, remote workers, and tech enthusiasts who have traded cubicles for coffee shops worldwide. Every article, review, and guide on The Signal Seeker is rooted in genuine, first-hand experience from the road.'
+          ),
+        },
+      ],
+    },
+    {
+      title: 'Contact',
+      slug: 'contact',
+      meta: {
+        title: 'Contact | The Signal Seeker',
+        description: 'Get in touch with The Signal Seeker team — questions, press inquiries, or collaboration ideas.',
+      },
+      layout: [
+        {
+          blockType: 'content',
+          richText: await markdownToLexical(
+            'Have a question, a press inquiry, or a collaboration idea? We\'d love to hear from you. The best way to reach us is via email.\n\n' +
+            '## Email Us\n\n' +
+            '[hello@thesignalseeker.com](mailto:hello@thesignalseeker.com)\n\n' +
+            '## Press Inquiries\n\n' +
+            '[press@thesignalseeker.com](mailto:press@thesignalseeker.com)'
+          ),
+        },
+      ],
+    },
+    {
+      title: 'Terms of Service',
+      slug: 'terms',
+      meta: {
+        title: 'Terms of Service | The Signal Seeker',
+        description: 'Terms of service for The Signal Seeker website and platform.',
+      },
+      layout: [
+        {
+          blockType: 'content',
+          richText: await markdownToLexical(
+            'Welcome to The Signal Seeker. These terms of service outline the rules and regulations for the use of our Website and Platform. By accessing this website we assume you accept these terms of service. Do not continue to use The Signal Seeker if you do not agree to take all of the terms and conditions stated on this page.\n\n' +
+            '## 1. License\n\n' +
+            'Unless otherwise stated, The Signal Seeker and/or its licensors own the intellectual property rights for all material on The Signal Seeker. All intellectual property rights are reserved. You may access this from The Signal Seeker for your own personal use subjected to restrictions set in these terms and conditions.\n\n' +
+            '## 2. Restrictions\n\n' +
+            'You are specifically restricted from all of the following:\n\n' +
+            '- Publishing any Website material in any other media without proper attribution.\n' +
+            '- Selling, sublicensing and/or otherwise commercializing any Website material.\n' +
+            '- Using this Website in any way that is or may be damaging to this Website.\n' +
+            '- Using this Website in any way that impacts user access to this Website.\n\n' +
+            '## 3. User Content\n\n' +
+            'In these Website Standard Terms and Conditions, "Your Content" shall mean any audio, video text, images or other material you choose to display on this Website. By displaying Your Content, you grant The Signal Seeker a non-exclusive, worldwide irrevocable, sub licensable license to use, reproduce, adapt, publish, translate and distribute it in any and all media.\n\n' +
+            '## 4. No Warranties\n\n' +
+            'This Website is provided "as is," with all faults, and The Signal Seeker express no representations or warranties, of any kind related to this Website or the materials contained on this Website. Information provided on destinations is for general informational purposes only.\n\n' +
+            '## 5. Governing Law & Jurisdiction\n\n' +
+            'These Terms will be governed by and interpreted in accordance with the laws of the applicable jurisdiction, and you submit to the non-exclusive jurisdiction of the state and federal courts located in us for the resolution of any disputes.'
+          ),
+        },
+      ],
+    },
+    {
+      title: 'Privacy Policy',
+      slug: 'privacy',
+      meta: {
+        title: 'Privacy Policy | The Signal Seeker',
+        description: 'Privacy policy for The Signal Seeker — how we collect, use, and protect your data.',
+      },
+      layout: [
+        {
+          blockType: 'content',
+          richText: await markdownToLexical(
+            'At The Signal Seeker, we respect your privacy and are committed to protecting the personal information you share with us. This Privacy Policy outlines how our application collects, uses, and safeguards your data.\n\n' +
+            '## 1. Information We Collect\n\n' +
+            'We may collect several types of information from and about users of our Website, including:\n\n' +
+            '- **Personal Data:** Information by which you may be personally identified, such as name and e-mail address.\n' +
+            '- **Usage Details:** Details of your visits to our Website, including traffic data, location data, logs, and other communication data depending on the resources that you access on the Website.\n\n' +
+            '## 2. How We Use Your Information\n\n' +
+            'We use information that we collect about you or that you provide to us, including any personal information:\n\n' +
+            '- To present our Website and its contents to you.\n' +
+            '- To provide you with information, products, or services that you request from us.\n' +
+            '- To fulfill any other purpose for which you provide it.\n' +
+            '- To notify you about changes to our Website or any products or services we offer or provide though it.\n\n' +
+            '## 3. Disclosure of Your Information\n\n' +
+            'We do not sell, trade, or otherwise transfer to outside parties your Personally Identifiable Information unless we provide users with advance notice. This does not include website hosting partners and other parties who assist us in operating our website, conducting our business, or serving our users, so long as those parties agree to keep this information confidential.\n\n' +
+            '## 4. Your Data Rights\n\n' +
+            'Depending on your location, you may have the right to request access to, correction of, or deletion of your personal data. To exercise these rights, please contact us at our provided support email.\n\n' +
+            '## 5. Contact Information\n\n' +
+            'To ask questions or comment about this privacy policy and our privacy practices, contact us via our [Contact Page](/contact).'
+          ),
+        },
+      ],
+    },
+    {
+      title: 'FAQs',
+      slug: 'faqs',
+      meta: {
+        title: 'FAQs | The Signal Seeker',
+        description: 'Frequently asked questions about The Signal Seeker — gear reviews, guest posts, and how we work.',
+      },
+      layout: [
+        {
+          blockType: 'faq',
+          items: [
+            {
+              question: 'How do you test the gear you review?',
+              answer: 'Every product we review is tested in real-world conditions — on flights, in coworking spaces, at cafes, and in Airbnbs around the world. We use each item for at least two weeks before writing about it, so our reviews reflect genuine long-term use, not just unboxing impressions.',
+            },
+            {
+              question: 'Do you accept sponsored content?',
+              answer: 'We occasionally partner with brands we genuinely use and trust. Any sponsored content is always clearly disclosed. We never let partnerships influence our editorial opinion — if a product doesn\'t meet our standards, we won\'t recommend it regardless of sponsorship.',
+            },
+            {
+              question: 'Can I contribute a guest post?',
+              answer: 'We\'re always looking for experienced digital nomads and remote workers with unique stories and insights. If you have a compelling pitch — a gear comparison, a location guide, or a workflow tip — reach out via our Contact page with a brief outline and writing samples.',
+            },
+            {
+              question: 'How often do you publish new content?',
+              answer: 'We publish new articles weekly, with a mix of gear reviews, digital nomad guides, and travel tech deep dives. Subscribe to stay updated — we focus on quality over quantity, so every piece is thoroughly researched and field-tested.',
+            },
+          ],
+        },
+      ],
+    },
+  ]
+
+  for (const page of staticPages) {
+    try {
+      const result = await payloadPost('pages', {
+        ...page,
+        _status: 'published',
+      })
+      const doc = (result as { doc?: { id: number } }).doc || result
+      const id = (doc as { id: number }).id
+      console.log(`   ✓ Page: "${page.title}" (id: ${id})`)
+    } catch (e) {
+      console.error(`   ✗ Failed to create page "${page.title}": ${(e as Error).message.slice(0, 200)}`)
+    }
   }
 
   console.log('\n✅ Migration complete!\n')

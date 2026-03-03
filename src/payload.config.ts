@@ -17,6 +17,7 @@ import { Pages } from './collections/Pages'
 import { Header } from './globals/Header'
 import { Footer } from './globals/Footer'
 import { seoPlugin } from '@payloadcms/plugin-seo'
+import { mcpPlugin } from '@payloadcms/plugin-mcp'
 
 const filename = fileURLToPath(import.meta.url)
 const dirname = path.dirname(filename)
@@ -78,6 +79,15 @@ export default buildConfig({
         `${doc?.title ?? ''} | The Signal Seeker`,
       generateDescription: ({ doc }: { doc: Record<string, unknown> }) =>
         (doc?.excerpt as string) ?? '',
+    }),
+    mcpPlugin({
+      collections: {
+        posts: { enabled: true },
+        pages: { enabled: true },
+        authors: { enabled: true },
+        categories: { enabled: true },
+        media: { enabled: true },
+      },
     }),
   ],
 })
