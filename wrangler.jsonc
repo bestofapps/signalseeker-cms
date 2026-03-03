@@ -30,11 +30,15 @@
     //   "service": "my-app"
     // },
   ],
+  "observability": {
+    "enabled": false
+  },
   "r2_buckets": [
     {
       "binding": "R2",
       "bucket_name": "signalseeker-cms","preview_bucket_name": "signalseeker-cms",
     },
+
     // Create a R2 binding with the binding name "NEXT_INC_CACHE_R2_BUCKET"
     // {
     //   "binding": "NEXT_INC_CACHE_R2_BUCKET",
