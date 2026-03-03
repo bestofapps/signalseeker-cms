@@ -52,6 +52,7 @@ const cloudflare =
     : await getCloudflareContext({ async: true })
 
 export default buildConfig({
+  serverURL: process.env.PAYLOAD_PUBLIC_SERVER_URL || '',
   admin: {
     user: Users.slug,
     importMap: {
